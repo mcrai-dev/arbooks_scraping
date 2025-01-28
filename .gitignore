@@ -1,0 +1,5 @@
+# Ignore les fichiers et répertoires suivants
+node_modules/
+build/
+dist/
+.env
