@@ -15,11 +15,16 @@ API permettant de récupérer des informations produits depuis différentes plat
 ## Installation
 
 1. Cloner le repository
-2. Installer les dépendances :
+2. Cree une environement virtuelle
+```bash
+python -m venv .env
+```
+3. Activer l'environement virtuelle
+4. Installer les dépendances :
 ```bash
 pip install -r requirements.txt
 ```
-3. Installer les dépendances de Playwright :
+5. Installer les dépendances de Playwright :
 ```bash
 playwright install
 ```
