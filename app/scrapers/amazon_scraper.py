@@ -59,23 +59,29 @@ class AmazonScraper:
 
     def parse_item(self, item) -> Optional[Dict[str, Any]]:
         try:
+            asin = item.get('data-asin', '')
             # Title
             title = item.h2.text.strip() if item.h2 else ""
             # product url
-            href = item.select_one('div[data-cy="title-recipe"] a.a-text-normal').get('href', '')
+            href = item.select_one('a.a-link-normal').get('href','')
             product_url = self.BASE_URL + href if href and not href.startswith('http') else href
-            image_url = item.select_one('img.s-image').get('src', '') if item.select_one('img.s-image') else ""
-            # procudt price
-            price = item.find('span', 'a-offscreen').text.strip() if item.find('span', 'a-offscreen') else ""
+            # Image URL
+            image_url = item.select_one('img.s-image')['src'] if item.select_one('img.s-image') else ""
+            # Price
+            price = item.find('span', class_='a-offscreen').text.strip() if item.find('span', class_='a-offscreen') else ""
+            # product rating
+            rating = item.select_one('span.a-icon-alt').text.strip() if item.select_one('span.a-icon-alt') else None
             # stock availability
             stock = not bool(item.select_one('.s-item__out-of-stock'))
 
             if title and product_url:
                 logging.info(f"🛒 {title} - {price} - {stock} - {product_url[:10]}... -")
                 return {
+                    "asin":asin,
                     "name": title,
                     "price": price,
                     "stock": stock,
+                    "rating":rating,
                     "image_url": image_url,
                     "product_url": product_url,
                     "source": "amazon"

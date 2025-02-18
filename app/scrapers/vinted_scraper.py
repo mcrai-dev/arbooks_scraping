@@ -213,7 +213,7 @@ class VintedScraper:
                 img_elem = product_container.find_previous("img") if product_container else None
                 image_url = img_elem.get("src") if img_elem else ""
 
-                print(f"🛒 {title} - {price_text} - {size_text} - {product_url}")
+                logger.info(f"🛒 {title} - {price_text} - {size_text} - {product_url}")
 
                 products.append({
                     "name": title,
