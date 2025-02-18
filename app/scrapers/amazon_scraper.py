@@ -1,16 +1,12 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import logging
-import json
-import urllib.parse
-import asyncio
 import aiohttp
 from bs4 import BeautifulSoup
-import re
 
 class AmazonScraper:
     BASE_URL = "https://www.amazon.fr"
     SEARCH_URL = "https://www.amazon.fr/s"
-    
+
     async def search(self, query: str, limit: int = 100) -> List[Dict[str, Any]]:
         products = []
         params = {
@@ -19,7 +15,7 @@ class AmazonScraper:
             'sprefix': f'{query},aps,283',
             'crid': '2M7LQQC1YQLR0'
         }
-        
+
         # Headers that mimic a real browser
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -37,80 +33,55 @@ class AmazonScraper:
             'downlink': '10',
             'ect': '4g',
         }
-        
+
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(self.SEARCH_URL, params=params, headers=headers, ssl=False) as response:
-                    if response.status == 200:
-                        content = await response.text()
-                        
-                        # Parse the HTML with BeautifulSoup
-                        soup = BeautifulSoup(content, 'html.parser')
-                        
-                        # Find all product items
-                        items = soup.select('div[data-component-type="s-search-result"]')
-                        
-                        logging.info(f"Found {len(items)} items on Amazon for query: {query}")
-                        
-                        for item in items[:limit]:
-                            try:
-                                # Extract title
-                                title_elem = item.select_one('h2 a span')
-                                title = title_elem.text.strip() if title_elem else ""
-                                
-                                # Extract price
-                                price = 0.0
-                                price_whole = item.select_one('.a-price-whole')
-                                price_fraction = item.select_one('.a-price-fraction')
-                                
-                                if price_whole:
-                                    price_text = price_whole.text.strip()
-                                    if price_fraction:
-                                        price_text += "." + price_fraction.text.strip()
-                                    try:
-                                        price = float(price_text.replace(',', '').replace('€', ''))
-                                    except:
-                                        pass
-                                
-                                # Extract link
-                                link_elem = item.select_one('h2 a')
-                                product_url = ""
-                                if link_elem:
-                                    href = link_elem.get('href', '')
-                                    if href:
-                                        product_url = self.BASE_URL + href if not href.startswith('http') else href
-                                
-                                # Extract image
-                                img_elem = item.select_one('img.s-image')
-                                image_url = img_elem.get('src', '') if img_elem else ""
-                                
-                                # Extract stock status
-                                stock = True
-                                unavailable = item.select_one('.s-item__out-of-stock')
-                                if unavailable:
-                                    stock = False
-                                
-                                if title and product_url:
-                                    products.append({
-                                        "name": title,
-                                        "price": price,
-                                        "stock": stock,
-                                        "image_url": image_url,
-                                        "product_url": product_url,
-                                        "source": "amazon"
-                                    })
-                                
-                            except Exception as e:
-                                logging.error(f"Error parsing Amazon item: {str(e)}")
-                                continue
-                    else:
+                    if response.status != 200:
                         error_text = await response.text()
                         raise Exception(f"HTTP {response.status}: {error_text}")
-                        
+
+                    content = await response.text()
+                    soup = BeautifulSoup(content, 'html.parser')
+                    items = soup.select('div[data-component-type="s-search-result"]')
+                    logging.info(f"Found {len(items)} items on Amazon for query: {query}")
+
+                    for item in items[:limit]:
+                        product = self.parse_item(item)
+                        if product:
+                            products.append(product)
+
         except Exception as e:
             logging.error(f"Error scraping Amazon: {str(e)}")
-            raise Exception(f"Error scraping Amazon: {str(e)}")
-            
+            raise
+
         return products
+
+    def parse_item(self, item) -> Optional[Dict[str, Any]]:
+        try:
+            # Title
+            title = item.h2.text.strip() if item.h2 else ""
+            # product url
+            href = item.select_one('div[data-cy="title-recipe"] a.a-text-normal').get('href', '')
+            product_url = self.BASE_URL + href if href and not href.startswith('http') else href
+            image_url = item.select_one('img.s-image').get('src', '') if item.select_one('img.s-image') else ""
+            # procudt price
+            price = item.find('span', 'a-offscreen').text.strip() if item.find('span', 'a-offscreen') else ""
+            # stock availability
+            stock = not bool(item.select_one('.s-item__out-of-stock'))
+
+            if title and product_url:
+                logging.info(f"🛒 {title} - {price} - {stock} - {product_url[:10]}... -")
+                return {
+                    "name": title,
+                    "price": price,
+                    "stock": stock,
+                    "image_url": image_url,
+                    "product_url": product_url,
+                    "source": "amazon"
+                }
+        except Exception as e:
+            logging.error(f"Error parsing Amazon item: {str(e)}")
+            return None
 
 amazon_scraper = AmazonScraper()
