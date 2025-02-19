@@ -76,6 +76,12 @@ class AmazonScraper(BaseScraper):
             title = item.h2.text.strip() if item.h2 else ""
             # URL du produit
             href = item.select_one("a.a-link-normal").get("href", "")
+
+            livraison = item.select_one('div[data-cy="delivery-recipe"]')
+            livraison = livraison.text if livraison else None
+            livraison = "".join(livraison.strip().split(' ')[2:]) if livraison else None
+            
+
             product_url = (
                 self.BASE_URL + href if href and not href.startswith("http") else href
             )
@@ -108,6 +114,7 @@ class AmazonScraper(BaseScraper):
                     "product_id": asin,
                     "name": title,
                     "price": price,
+                    "delivery":livraison,
                     "stock": stock,
                     "rating": rating,
                     "image_url": image_url,
