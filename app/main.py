@@ -45,7 +45,7 @@
 # async def search_products(platform: str, query: str, limit: int = 100) -> List[Dict[str, Any]]:
 #     """
 #     Search for products across specified platform
-    
+
 #     Parameters:
 #     - platform: Platform to search on (leboncoin, amazon, vinted)
 #     - query: Search query
@@ -56,7 +56,7 @@
 #             status_code=400,
 #             detail=f"Platform '{platform}' not supported. Available platforms: {list(PLATFORM_SCRAPERS.keys())}"
 #         )
-        
+
 #     try:
 #         scraper = PLATFORM_SCRAPERS[platform]
 #         results = await scraper.search(query, limit)
@@ -69,14 +69,14 @@
 # async def search_all_platforms(query: str, limit: int = 100) -> Dict[str, List[Dict[str, Any]]]:
 #     """
 #     Search for products across all available platforms
-    
+
 #     Parameters:
 #     - query: Search query
 #     - limit: Maximum number of results per platform (default: 100)
 #     """
 #     results = {}
 #     errors = []
-    
+
 #     for platform, scraper in PLATFORM_SCRAPERS.items():
 #         try:
 #             platform_results = await scraper.search(query, limit)
@@ -85,27 +85,18 @@
 #             logging.error(f"Error searching on {platform}: {str(e)}")
 #             errors.append({"platform": platform, "error": str(e)})
 #             results[platform] = []
-            
+
 #     if errors:
 #         return {
 #             "results": results,
 #             "errors": errors
 #         }
-    
+
 #     return {"results": results}
 
 # if __name__ == "__main__":
 #     import uvicorn
 #     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-
-
-
-
-
-
-
-
-
 
 
 from fastapi import FastAPI, HTTPException
@@ -124,8 +115,9 @@ app = FastAPI(title="Multi-Platform Product Search API")
 PLATFORM_SCRAPERS = {
     "vinted": vinted_scraper,
     "amazon": amazon_scraper,
-    "leboncoin": leboncoin_scraper
+    "leboncoin": leboncoin_scraper,
 }
+
 
 @app.get("/")
 async def root():
@@ -135,39 +127,45 @@ async def root():
         "endpoints": {
             "search_platform": "/search/{platform}/{query}?limit={limit}",
             "platforms": "/platforms",
-            "search_all": "/search/all/{query}?limit={limit}"
-        }
+            "search_all": "/search/all/{query}?limit={limit}",
+        },
     }
+
 
 @app.get("/platforms")
 async def get_platforms():
     """Get list of available platforms"""
-    return {
-        "platforms": list(PLATFORM_SCRAPERS.keys())
-    }
+    return {"platforms": list(PLATFORM_SCRAPERS.keys())}
+
 
 @app.get("/search/{platform}/{query}")
-async def search_products(platform: str, query: str, limit: int = 100) -> List[Dict[str, Any]]:
+async def search_products(
+    platform: str, query: str, limit: int = 100
+) -> List[Dict[str, Any]]:
     """
     Search for products across specified platform
-    
+
     Parameters:
     - platform: Platform to search on (leboncoin, amazon, vinted)
     - query: Search query
     - limit: Maximum number of results (default: 100)
     """
-    print(f" API: Requête reçue pour {platform} avec query='{query}' et limit={limit}")  # Debug
+    print(
+        f" API: Requête reçue pour {platform} avec query='{query}' et limit={limit}"
+    )  # Debug
     if platform not in PLATFORM_SCRAPERS:
         raise HTTPException(
             status_code=400,
-            detail=f"Platform '{platform}' not supported. Available platforms: {list(PLATFORM_SCRAPERS.keys())}"
+            detail=f"Platform '{platform}' not supported. Available platforms: {list(PLATFORM_SCRAPERS.keys())}",
         )
 
     try:
         scraper = PLATFORM_SCRAPERS[platform]
         print(f" API: Lancement du scraping pour {platform}")  # Debug
         results = await scraper.search(query, limit)
-        print(f" API: Scraping terminé pour {platform}, {len(results)} résultats trouvés")  # Debug
+        print(
+            f" API: Scraping terminé pour {platform}, {len(results)} résultats trouvés"
+        )  # Debug
         return results
     except Exception as e:
         logging.error(f"🚨 Erreur lors du scraping de {platform} : {str(e)}")
@@ -175,7 +173,9 @@ async def search_products(platform: str, query: str, limit: int = 100) -> List[D
 
 
 @app.get("/search/all/{query}")
-async def search_all_platforms(query: str, limit: int = 10) -> Dict[str, List[Dict[str, Any]]]:
+async def search_all_platforms(
+    query: str, limit: int = 10
+) -> Dict[str, List[Dict[str, Any]]]:
     """
      Recherche de produits sur toutes les plateformes disponibles
     - `query`: Nom du produit à rechercher
@@ -202,4 +202,5 @@ async def search_all_platforms(query: str, limit: int = 10) -> Dict[str, List[Di
 #  Lancer FastAPI avec uvicorn si le script est exécuté directement
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
