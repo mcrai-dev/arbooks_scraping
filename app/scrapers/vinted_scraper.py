@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from typing import List, Dict, Any, Optional
 from selenium import webdriver
@@ -9,7 +8,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
-from .BaseScraper import BaseScraper
+from .BaseScraper import BaseScraper  # Assuming this is your base class
 
 
 class VintedScraper(BaseScraper):
@@ -18,122 +17,141 @@ class VintedScraper(BaseScraper):
     SEARCH_URL = "https://www.vinted.fr/catalog"
 
     def __init__(self):
-        """Initialisation du navigateur avec les options optimisées."""
+        """Initialisation du navigateur avec les options."""
         options = Options()
-        options.add_argument(
-            "--disable-blink-features=AutomationControlled"
-        )  # Masquer Selenium
-        options.add_argument(
-            "--headless"
-        )  # Exécuter en arrière-plan (mettre False pour voir le navigateur)
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_argument("--headless")  # Set to False to see the browser
         options.add_argument("--disable-popup-blocking")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-infobars")
         options.add_argument("--disable-gpu")
         options.add_argument("--start-maximized")
-        options.add_argument("--log-level=3")  # Réduit les logs inutiles
+        options.add_argument("--log-level=3")  # Reduce unnecessary logs
 
         service = Service(ChromeDriverManager().install())
         self.driver = webdriver.Chrome(service=service, options=options)
 
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *excinfo):
+        self.driver.quit()
+
     async def get_page_content(self, url: str) -> str:
-        """Obtenir le contenu d'une page."""
-        self.driver.get(url)
-
-        # Attendre que la page charge entièrement
-        # await asyncio.sleep(5)
-
+        """Récupérer le contenu de la page avec Selenium et gestion des erreurs."""
         try:
-            WebDriverWait(self.driver, 1).until(
+            self.driver.get(url)
+            WebDriverWait(self.driver, 10).until(
                 EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, 'p[data-testid*="description-title"]')
-                )
+                    (By.CSS_SELECTOR, "div.feed-grid__item-content")
+                )  
             )
             return self.driver.page_source
         except Exception as e:
-            logging.error("Aucun produit trouvé ! Vérifie si Vinted te bloque.")
-            raise e
+            logging.error(
+                f"Erreur lors du chargement de la page {url} : {str(e)}"
+            )  # More specific error message
+            return ""
 
     async def search(self, query: str, limit: int = 100) -> List[Dict[str, Any]]:
-        products = []
+        produits = []
         params = {
             "search_text": query,
             "order": "newest_first",
         }
+        url = f"{self.SEARCH_URL}?{self._encode_params(params)}"  # build the url here
         try:
-            logging.info(f"🔍 Recherche de '{query}' sur Vinted!")
-            content = await self.get_page_content(
-                f"{self.SEARCH_URL}?{self._encode_params(params)}"
-            )
-            soup = BeautifulSoup(content, "html.parser")
+            logging.info(f"🔍 Recherche de '{query}' sur Vinted...")
+            content = await self.get_page_content(url)
+            await self.__aexit__()
+            if not content:
+                return []
 
-            items = soup.select('p[data-testid*="description-title"]')
-            logging.info(f"Trouvé {len(items)} éléments sur Vinted pour: {query}")
+            soup = BeautifulSoup(content, "html.parser")
+            items = soup.find_all(
+                "div", class_="feed-grid__item-content"
+            )  # use the more robust selector
+            logging.info(f"Trouvé {len(items)} articles sur Vinted pour: {query}")
+
             for item in items[:limit]:
-                product = self.parse_item(item)
-                if product:
-                    products.append(product)
+                produit = self.parse_item(item)
+                if produit:
+                    produits.append(produit)
+
         except Exception as e:
             logging.error(f"Erreur lors du scraping de Vinted: {str(e)}")
-            raise e
+            raise
 
-        return products
+        return produits
 
     def parse_item(self, item) -> Optional[Dict[str, Any]]:
         try:
-            title = item.text.strip()
+            # Vendeur
+            # seller_element = item.select_one('div[data-testid*="owner"]')
+            # seller = seller_element.text.strip() if seller_element else None
+            # seller_url = seller_element.select_one("a").get("href") if seller_element else None
 
-            # Récupérer le prix
-            price_elem = item.find_next(
-                "p", {"data-testid": lambda x: x and "price-text" in x}
-            )
-            price_text = (
-                price_elem.text.strip().replace("\xa0", " ")
-                if price_elem
-                else "Prix inconnu"
+            # URL du produit
+            link_element = item.select_one("a.new-item-box__overlay")
+            product_url = (
+                self.BASE_URL + link_element.get("href")
+                if link_element and link_element.get("href")
+                else None
             )
 
-            # Récupérer la taille
-            size_elem = item.find_next(
-                "p", {"data-testid": lambda x: x and "description-subtitle" in x}
-            )
-            size_text = size_elem.text.strip() if size_elem else "Taille inconnue"
-
-            # Récupérer le lien du produit
-            product_container = item.find_parent(
-                "div", {"data-testid": lambda x: x and "description" in x}
-            )
-            link_elem = (
-                product_container.find_previous("a") if product_container else None
-            )
-            href = link_elem.get("href", "") if link_elem else ""
-            product_url = href if href.startswith("http") else self.BASE_URL + href
-
-            # Product Id
+            # ID du produit (data-testid)
+            product_id_element = item.select_one(
+                '[data-testid*="product-item-id"]'
+            )  # Select by partial attribute
             product_id = (
-                product_url.split("/")[-1].split("-")[0] if product_url else None
+                product_id_element.get("data-testid").split("--")[0].split("-")[-1]
+                if product_id_element
+                else None
+            )  # Extract ID
+
+            # Image URL
+            image_element = item.select_one("img.web_ui__Image__content")
+            image_url = image_element.get("src") if image_element else None
+
+            # Titre (plusieurs options car la structure peut varier)
+            title_element = item.select_one(
+                ".new-item-box__description p.web_ui__Text__text"
             )
+            title = title_element.text.strip() if title_element else None
 
-            # Récupérer l'image
-            img_elem = (
-                product_container.find_previous("img") if product_container else None
+            # Prix
+            price_element = item.select_one('p[data-testid*="--price-text"]')
+            price = price_element.text.strip() if price_element else None
+            price_element_pro = item.select_one(
+                'button[aria-label*="Protection"]>span>span'
             )
-            image_url = img_elem.get("src") if img_elem else ""
+            price_pro = price_element_pro.text.strip() if price_element else None
 
-            logging.info(f"🛒 {title} - {price_text} - {size_text} - {product_url}")
+            #  Description (peut être absente)
+            description = item.select_one('p[data-testid*="description-subtitle"]')
+            description = description.text.strip() if description else None
 
-            return {
-                "product_id": product_id,
-                "name": title,
-                "price": price_text,
-                "size": size_text,
-                "image_url": image_url,
-                "product_url": product_url,
-                "source": "vinted",
-            }
+            if product_url and product_id and title and price:
+                logging.info(
+                    f" Article Vinted: {title} - {price} - {product_url[:20]}..."
+                )
+                return {
+                    "source": "vinted",
+                    "product_id": product_id,
+                    "title": title,
+                    "price": price,
+                    "price_with_protection": price_pro,
+                    # "seller": seller,
+                    # "seller_url": seller_url,
+                    "description": description,
+                    "product_url": product_url,
+                    "image_url": image_url,
+                }
+            return None
+
         except Exception as e:
-            logging.error(f"Erreur lors de l'extraction d'un produit : {str(e)}")
+            logging.error(f"Erreur extraction article Vinted: {str(e)}")
             return None
 
 
