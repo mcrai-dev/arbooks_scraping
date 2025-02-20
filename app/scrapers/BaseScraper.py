@@ -27,6 +27,6 @@ class BaseScraper:
         """Base search method to be implemented by each scraper"""
         raise NotImplementedError("Each scraper must implement its own search method")
 
-    async def get_detail(self, product: Dict) -> List[Dict[str, Any]]:
+    async def get_detail(self, product_url: Dict) -> List[Dict[str, Any]]:
         """Base search method to be implemented by each scraper"""
         raise NotImplementedError("Each scraper must implement its own search method")

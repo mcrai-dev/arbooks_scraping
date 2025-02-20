@@ -171,6 +171,29 @@ async def search_products(
         logging.error(f"🚨 Erreur lors du scraping de {platform} : {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/detail/{platform}/{product_url:path}")
+async def get_product_detail(platform: str, product_url: str) -> List[Dict[str, Any]]:
+    """
+    Get details for a specific product on a platform
+
+    Parameters:
+    - platform: Platform to search on (leboncoin, amazon, vinted)
+    - product_url: URL of the product to get details for
+    """
+    if platform not in PLATFORM_SCRAPERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Platform '{platform}' not supported. Available platforms: {list(PLATFORM_SCRAPERS.keys())}",
+        )
+
+    try:
+        scraper = PLATFORM_SCRAPERS[platform]
+        results = await scraper.get_detail(product_url)
+        return results
+    except Exception as e:
+        logging.error(f"Error searching on {platform}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/search/all/{query}")
 async def search_all_platforms(

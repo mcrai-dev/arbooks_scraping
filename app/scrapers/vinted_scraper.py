@@ -19,6 +19,9 @@ class VintedScraper(BaseScraper):
     def __init__(self):
         """Initialisation du navigateur avec les options."""
         options = Options()
+        options.add_argument(
+            "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
+        )
         options.add_argument("--disable-blink-features=AutomationControlled")
         options.add_argument("--headless")  # Set to False to see the browser
         options.add_argument("--disable-popup-blocking")
@@ -38,14 +41,12 @@ class VintedScraper(BaseScraper):
     async def __aexit__(self, *excinfo):
         self.driver.quit()
 
-    async def get_page_content(self, url: str) -> str:
+    async def get_page_content(self, url: str, wait_for: str) -> str:
         """Récupérer le contenu de la page avec Selenium et gestion des erreurs."""
         try:
             self.driver.get(url)
             WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, "div.feed-grid__item-content")
-                )  
+                EC.presence_of_element_located((By.CSS_SELECTOR, wait_for))
             )
             return self.driver.page_source
         except Exception as e:
@@ -63,8 +64,7 @@ class VintedScraper(BaseScraper):
         url = f"{self.SEARCH_URL}?{self._encode_params(params)}"  # build the url here
         try:
             logging.info(f"🔍 Recherche de '{query}' sur Vinted...")
-            content = await self.get_page_content(url)
-            await self.__aexit__()
+            content = await self.get_page_content(url, "div.feed-grid__item-content")
             if not content:
                 return []
 
@@ -153,6 +153,101 @@ class VintedScraper(BaseScraper):
         except Exception as e:
             logging.error(f"Erreur extraction article Vinted: {str(e)}")
             return None
+
+    def parse_detail(self, item) -> List[Dict[str, Any]]:
+        detail_container = item.select_one("div.details-list.details-list--details")
+        if not detail_container:
+            return []
+
+        details = {}
+        status = item.select_one('div[data-testid="item-status--content"]')
+        details["status"] = status.text.strip() if status else "Disponible"
+
+        price = item.select_one('div[data-testid="item-price"]')
+        details["price"] = price.text.strip().replace("\xa0", " ") if price else None
+
+        price_protection = item.select_one('button[aria-label*="Protection"] > div')
+        details["price_with_protection"] = (
+            price_protection.text.strip().replace("\xa0", " ")
+            if price_protection
+            else None
+        )
+
+        # Extract Brand
+        brand_element = detail_container.select_one('span[itemprop="name"]')
+        details["brand"] = brand_element.text.strip() if brand_element else None
+
+        # Extract Size
+        size_element = detail_container.select_one('div[itemprop="size"]')
+        details["size"] = size_element.text.strip() if size_element else None
+
+        condition_element = detail_container.select_one('div[itemprop="status"]')
+        details["condition"] = (
+            condition_element.text.strip() if condition_element else None
+        )
+
+        color_element = detail_container.select_one('div[itemprop="color"]')
+        details["color"] = color_element.text.strip() if color_element else None
+
+        views_element = detail_container.select_one('div[itemprop="view_count"]')
+        details["views"] = int(views_element.text.strip()) if views_element else None
+
+        interested_element = detail_container.select_one('div[itemprop="interested"]')
+        details["interested"] = (
+            int(interested_element.text.strip().split(" ")[0])
+            if interested_element
+            else None
+        )
+
+        payment_element = detail_container.select_one('div[itemprop="payment_methods"]')
+        details["payment"] = payment_element.text.strip() if payment_element else None
+
+        # Extract Uploaded Date
+        uploaded_element = detail_container.select_one(
+            'div[data-testid="item-attributes-upload_date"] [itemprop="upload_date"]'
+        )
+        details["uploaded"] = (
+            uploaded_element.text.strip() if uploaded_element else None
+        )
+        # Extract Delivery Price
+        delivery_element = item.select_one('[data-testid="item-shipping-banner-price"]')
+        details["delivery"] = (
+            delivery_element.text.strip().replace("\xa0", " ")
+            if delivery_element
+            else None
+        )
+
+        description_element = item.select_one('div[itemprop="description"]')
+        details["description"] = (
+            description_element.text.strip().replace('\n', '') if description_element else None
+        )
+
+        owner_name = item.select_one('[data-testid="profile-username"]')
+        details["owner_name"] = owner_name.text.strip() if owner_name else ""
+
+        owner_link_element = item.select_one(
+            "a.web_ui__Cell__cell.web_ui__Cell__default.web_ui__Cell__navigating.web_ui__Cell__with-chevron.web_ui__Cell__link"
+        )
+        owner_url = owner_link_element.get("href") if owner_link_element else None
+        if owner_url:
+            owner_url = self.BASE_URL + owner_url
+        details["owner_profile_url"] = owner_url
+        return [details]
+
+        return [details]
+
+    async def get_detail(self, product_url: str) -> List[Dict[str, Any]]:
+        logging.info("Obtenir la page contenant les detail du produits")
+        content = await self.get_page_content(product_url, "aside")
+        if not content:
+            return []
+        soup = BeautifulSoup(content, "html.parser")
+
+        aside = soup.select_one("aside")
+        if not aside:
+            return []
+        logging.info("Extraction des informatons importante")
+        return self.parse_detail(aside)
 
 
 vinted_scraper = VintedScraper()
