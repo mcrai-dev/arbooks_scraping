@@ -94,8 +94,7 @@ class VintedScraper(BaseScraper):
 
             # URL du produit
             link_element = item.select_one("a.new-item-box__overlay")
-            product_url = (
-                self.BASE_URL + link_element.get("href")
+            product_url = (link_element.get("href")
                 if link_element and link_element.get("href")
                 else None
             )
