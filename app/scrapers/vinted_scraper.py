@@ -68,7 +68,7 @@ class VintedScraper(BaseScraper):
             if not content:
                 return []
 
-            soup = BeautifulSoup(content, "html.parser")
+            soup = BeautifulSoup(content, "lxml")
             items = soup.find_all(
                 "div", class_="feed-grid__item-content"
             )  # use the more robust selector
@@ -153,12 +153,23 @@ class VintedScraper(BaseScraper):
             logging.error(f"Erreur extraction article Vinted: {str(e)}")
             return None
 
-    def parse_detail(self, item) -> List[Dict[str, Any]]:
+    def parse_detail(self, item, photos, categories) -> List[Dict[str, Any]]:
+        
         detail_container = item.select_one("div.details-list.details-list--details")
         if not detail_container:
             return []
 
         details = {}
+    
+        if categories:
+            categories = categories.select('a')
+            details['categorie'] = [categorie.text.strip() for  categorie in categories]
+
+        if photos:
+            imgs = photos.find_all('img')
+            details['photos'] = [img.get('src') for img in imgs]
+
+
         status = item.select_one('div[data-testid="item-status--content"]')
         details["status"] = status.text.strip() if status else "Disponible"
 
@@ -231,8 +242,7 @@ class VintedScraper(BaseScraper):
         if owner_url:
             owner_url = self.BASE_URL + owner_url
         details["owner_profile_url"] = owner_url
-        return [details]
-
+        
         return [details]
 
     async def get_detail(self, product_url: str) -> List[Dict[str, Any]]:
@@ -240,13 +250,15 @@ class VintedScraper(BaseScraper):
         content = await self.get_page_content(product_url, "aside")
         if not content:
             return []
-        soup = BeautifulSoup(content, "html.parser")
-
+        soup = BeautifulSoup(content, "lxml")
         aside = soup.select_one("aside")
         if not aside:
             return []
+        
+        categorie = soup.select_one('ul.breadcrumbs.breadcrumbs--truncated')
+        photos = soup.select_one("section.item-photos__container")
         logging.info("Extraction des informatons importante")
-        return self.parse_detail(aside)
+        return self.parse_detail(aside, photos, categorie)
 
 
 vinted_scraper = VintedScraper()

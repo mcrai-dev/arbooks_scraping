@@ -69,11 +69,10 @@ class AmazonScraper(BaseScraper):
             content = await self.get_page_content(
                 f"{self.SEARCH_URL}?{self._encode_params(params)}"
             )
-            await self.__aexit__()
             if not content:
                 return products
 
-            soup = BeautifulSoup(content, "html.parser")
+            soup = BeautifulSoup(content, "lxml")
             items = soup.select('div[data-component-type="s-search-result"]')
             logging.info(f"Trouvé {len(items)} éléments sur Amazon pour: {query}")
 
@@ -147,6 +146,61 @@ class AmazonScraper(BaseScraper):
         except Exception as e:
             logging.error(f"Erreur lors de l'extraction d'un produit : {str(e)}")
             return None
+
+    def parse_table(self, table):
+        headers = [el.text.strip() for el in table.find_all("th")]
+        rows = [el.text.strip() for el in table.find_all("td")]
+        return {th: td for th, td in zip(headers, rows)}
+
+    def parse_details(self, soup):
+        details = {}
+        
+        price_element = soup.select_one('div[id*="corePrice"] .a-offscreen, div[id*="corePrice"] .aok-offscreen')  # Combine selectors
+        details["price"] = price_element.text.strip() if price_element else None
+
+        category_elements = soup.select("#wayfinding-breadcrumbs_feature_div a")
+        details["categories"] = [cat.text.strip() for cat in category_elements] if category_elements else None
+
+        title_element = soup.select_one("#productTitle")
+        details["name"] = title_element.text.strip() if title_element else None
+        
+        image_elements = soup.select("#main-image-container img") + soup.select("#altImages img")
+        details['photos'] = [img.get('src') for img in image_elements if img.get('src')] if image_elements else None
+
+            
+        product_table = soup.select_one("#productDetails_feature_div table") or soup.select_one("#prodDetails table")
+        details["product_feature_table"] = self.parse_table(product_table) if product_table else None 
+
+        sizes = soup.select_one("#variation_size_name")
+        if sizes:
+            options = sizes.find_all("option")
+            details["sizes"] = [option.text for option in options[1:]] if options else None
+
+        availability = soup.select_one('#availability')
+        if availability:
+            details['available'] = True if availability.text.strip()==' En stock' else False
+
+        bullet_elements = soup.select("#feature-bullets li")
+        details["bullet_feature"] = [li.text.strip() for li in bullet_elements] if bullet_elements else None
+
+        color_elements = soup.select("#variation_color_name ul img")
+        details["colors"] = [
+            {"color": color.get("alt", ""), "img": color.get("src", "")}
+            for color in color_elements
+        ] if color_elements else None
+
+        description_element = soup.select_one("#productDescription p")
+        details["description"] = description_element.text.strip() if description_element else None
+
+        return [details]
+
+    async def get_detail(self, product_url) -> List[Dict[str, Any]]:
+        content = await self.get_page_content(product_url)
+        await self.__aexit__()
+        if not content:
+            return []
+        soup = BeautifulSoup(content, "lxml")
+        return self.parse_details(soup)
 
 
 amazon_scraper = AmazonScraper()
