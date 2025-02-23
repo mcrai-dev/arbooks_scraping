@@ -9,6 +9,35 @@ from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 from .BaseScraper import BaseScraper  # Assuming this is your base class
+from app.bd_scraping_arbook.database import init_db
+from app.bd_scraping_arbook.models_vinted import Product
+
+
+async def save_to_mongo(products: list[dict]):
+    """Insère les produits Vinted scrappés dans MongoDB en évitant les doublons."""
+    await init_db()  # S'assurer que la DB est connectée
+
+    if not products:
+        print(" Aucun produit à enregistrer dans MongoDB.")
+        return
+
+    for item in products:
+        try:
+            # Mise à jour si le produit existe déjà, sinon insertion
+            result = await Product.get_motor_collection().replace_one(
+                {"product_id": item["product_id"]},  # Vérifie l'existence par product_id
+                item,  # Remplace ou insère l'élément
+                upsert=True  # Insère si le produit n'existe pas encore
+            )
+
+            if result.matched_count > 0:
+                print(f" Produit {item['title']} ({item['product_id']}) mis à jour avec succès !")
+            else:
+                print(f" Produit {item['title']} ({item['product_id']}) inséré avec succès !")
+
+        except Exception as e:
+            print(f" Erreur lors de l'insertion MongoDB pour Vinted : {e}")
+
 
 
 class VintedScraper(BaseScraper):
@@ -55,6 +84,7 @@ class VintedScraper(BaseScraper):
             )  # More specific error message
             return ""
 
+
     async def search(self, query: str, limit: int = 100) -> List[Dict[str, Any]]:
         produits = []
         params = {
@@ -63,15 +93,13 @@ class VintedScraper(BaseScraper):
         }
         url = f"{self.SEARCH_URL}?{self._encode_params(params)}"  # build the url here
         try:
-            logging.info(f"🔍 Recherche de '{query}' sur Vinted...")
+            logging.info(f" Recherche de '{query}' sur Vinted...")
             content = await self.get_page_content(url, "div.feed-grid__item-content")
             if not content:
                 return []
 
             soup = BeautifulSoup(content, "lxml")
-            items = soup.find_all(
-                "div", class_="feed-grid__item-content"
-            )  # use the more robust selector
+            items = soup.find_all("div", class_="feed-grid__item-content")
             logging.info(f"Trouvé {len(items)} articles sur Vinted pour: {query}")
 
             for item in items[:limit]:
@@ -79,11 +107,17 @@ class VintedScraper(BaseScraper):
                 if produit:
                     produits.append(produit)
 
+            # Sauvegarde dans MongoDB après extraction
+            if produits:
+                logging.info(" Enregistrement des produits dans MongoDB...")
+                await save_to_mongo(produits)
+
         except Exception as e:
             logging.error(f"Erreur lors du scraping de Vinted: {str(e)}")
             raise
 
         return produits
+
 
     def parse_item(self, item) -> Optional[Dict[str, Any]]:
         try:

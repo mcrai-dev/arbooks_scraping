@@ -3,6 +3,36 @@ import logging
 import aiohttp
 from bs4 import BeautifulSoup
 from .BaseScraper import BaseScraper
+from app.bd_scraping_arbook.database import init_db
+from app.bd_scraping_arbook.models_amazon import AmazonProduct
+
+
+async def save_to_mongo(products: list[dict]):
+    """Insère les produits scrappés dans MongoDB en évitant les doublons (mise à jour si déjà existant)."""
+    await init_db()  # S'assurer que la DB est connectée
+
+    if not products:
+        print(" Aucun produit à enregistrer dans MongoDB.")
+        return
+
+    for item in products:
+        try:
+            # Utilisation de replace_one() avec upsert=True pour gérer la mise à jour et éviter les erreurs de duplication
+            result = await AmazonProduct.get_motor_collection().replace_one(
+                {"product_id": item["product_id"]},  # Vérifie l'existence
+                item,  # Remplace le document s'il existe, insère sinon
+                upsert=True  # Assure que l'opération est atomique
+            )
+
+            if result.matched_count > 0:
+                print(f" Produit {item['name']} ({item['product_id']}) mis à jour avec succès !")
+            else:
+                print(f" Produit {item['name']} ({item['product_id']}) inséré avec succès !")
+
+        except Exception as e:
+            print(f" Erreur lors de l'insertion MongoDB : {e}")
+
+
 
 
 class AmazonScraper(BaseScraper):
@@ -65,7 +95,7 @@ class AmazonScraper(BaseScraper):
             # "crid": "2M7LQQC1YQLR0",
         }
         try:
-            logging.info(f"🔍 Recherche de '{query}' sur Amazon!")
+            logging.info(f" Recherche de '{query}' sur Amazon!")
             content = await self.get_page_content(
                 f"{self.SEARCH_URL}?{self._encode_params(params)}"
             )
@@ -80,6 +110,11 @@ class AmazonScraper(BaseScraper):
                 product = self.parse_item(item)
                 if product:
                     products.append(product)
+            
+            if products :
+                logging.info(" Enregistrement des produits dans MongoDB...")
+                await save_to_mongo(products)
+
         except Exception as e:
             logging.error(f"Erreur lors du scraping d'Amazon: {str(e)}")
             raise
