@@ -5,6 +5,7 @@ from bs4 import BeautifulSoup
 from .BaseScraper import BaseScraper
 from app.bd_scraping_arbook.database import init_db
 from app.bd_scraping_arbook.models_amazon import AmazonProduct
+from .utils import Product
 
 
 async def save_to_mongo(products: list[dict]):
@@ -121,63 +122,56 @@ class AmazonScraper(BaseScraper):
         return products
 
     def parse_item(self, item) -> Optional[Dict[str, Any]]:
+        product = Product(source='amazon')
         try:
+            # Get product id
             asin = item.get("data-asin", "")
+            product.product_id = asin if asin else None
+
             # Titre
-            title = item.h2.text.strip() if item.h2 else ""
-            # URL du produit
-            href = item.select_one("a.a-link-normal").get("href", "")
+            product.name = item.h2.text.strip() if item.h2 else ""
+            
 
             livraison = item.select_one('div[data-cy="delivery-recipe"]')
             livraison = livraison.text if livraison else None
-            livraison = "".join(livraison.strip().split(" ")[2:]) if livraison else None
+            product.delivery_price = "".join(livraison.strip().split(" ")[2:]) if livraison else None
 
-            product_url = (
+            # URL du produit
+            href = item.select_one("a.a-link-normal").get("href", "")
+            product.url = (
                 self.BASE_URL + href if href and not href.startswith("http") else href
             )
             # URL de l'image
-            image_url = (
+            product.main_photo = (
                 item.select_one("img.s-image")["src"]
                 if item.select_one("img.s-image")
-                else ""
+                else None
             )
             # Prix
-            price = (
+            product.price = (
                 item.find("span", class_="a-offscreen").text.strip()
                 if item.find("span", class_="a-offscreen")
-                else ""
+                else None
             )
             # Évaluation du produit
-            rating = (
+            product.rating = (
                 item.select_one("span.a-icon-alt").text.strip()
                 if item.select_one("span.a-icon-alt")
                 else None
             )
             # Exclusivité Amazon
-            is_exclusive = bool(
+            product.is_exclusive = bool(
                 item.select_one("span.a-badge-text")
                 and "Exclusivité Amazon" in item.select_one("span.a-badge-text").text
             )
 
             # Disponibilité en stock
-            stock = not bool(item.select_one(".s-item__out-of-stock"))
+            product.stock = not bool(item.select_one(".s-item__out-of-stock"))
 
-            if title and product_url and asin:
-                logging.info(
-                    f"🛒 {title} - {price} - {stock} - {product_url[:10]}... -"
-                )
-                return {
-                    "source": "amazon",
-                    "product_id": asin,
-                    "name": title,
-                    "price": price,
-                    "delivery": livraison,
-                    "stock": stock,
-                    "is_exclusive": is_exclusive,
-                    "rating": rating,
-                    "product_url": product_url,
-                    "image_url": image_url,
-                }
+            if product.is_valid():
+                logging.info(product)
+                return product.to_dict()
+
         except Exception as e:
             logging.error(f"Erreur lors de l'extraction d'un produit : {str(e)}")
             return None
@@ -188,51 +182,58 @@ class AmazonScraper(BaseScraper):
         return {th: td for th, td in zip(headers, rows)}
 
     def parse_details(self, soup):
-        details = {}
-        
-        asin = soup.select_one('#all-offers-display-params')
-        if asin:
-            details['product_id'] = asin.get('data-asin')
-        
-        price_element = soup.select_one('div[id*="corePrice"] .a-offscreen, div[id*="corePrice"] .aok-offscreen')  # Combine selectors
-        details["price"] = price_element.text.strip() if price_element else None
-
-        category_elements = soup.select("#wayfinding-breadcrumbs_feature_div a")
-        details["categories"] = [cat.text.strip() for cat in category_elements] if category_elements else None
-
-        title_element = soup.select_one("#productTitle")
-        details["name"] = title_element.text.strip() if title_element else None
-        
-        image_elements = soup.select("#main-image-container img") + soup.select("#altImages img")
-        details['photos'] = [img.get('src') for img in image_elements if img.get('src')] if image_elements else None
-
+        product = Product(source='amazon')
+        try:
+            canonical_link = soup.select_one('link[rel="canonical"]')
+            product.url = canonical_link.get('href') if canonical_link else None
             
-        product_table = soup.select_one("#productDetails_feature_div table") or soup.select_one("#prodDetails table")
-        details["product_feature_table"] = self.parse_table(product_table) if product_table else None 
+            asin = soup.select_one('#all-offers-display-params')
+            if asin:
+                product.product_id = asin.get('data-asin')
+            
+            price_element = soup.select_one('div[id*="corePrice"] .a-offscreen, div[id*="corePrice"] .aok-offscreen')  # Combine selectors
+            product.price = price_element.text.strip() if price_element else None
 
-        sizes = soup.select_one("#variation_size_name")
-        if sizes:
-            options = sizes.find_all("option")
-            details["sizes"] = [option.text for option in options[1:]] if options else None
+            category_elements = soup.select("#wayfinding-breadcrumbs_feature_div a")
+            product.categories = [cat.text.strip() for cat in category_elements] if category_elements else None
 
-        availability = soup.select_one('#availability')
-        if availability:
-            details['stock'] = True if availability.text.strip()==' En stock' else False
+            title_element = soup.select_one("#productTitle")
+            product.name = title_element.text.strip() if title_element else None
+            
+            image_elements = soup.select("#main-image-container img") + soup.select("#altImages img")
+            product.detailed_photos = [img.get('src') for img in image_elements if img.get('src')] if image_elements else None
 
-        bullet_elements = soup.select("#feature-bullets li")
-        details["bullet_feature"] = [li.text.strip() for li in bullet_elements] if bullet_elements else None
+                
+            product_table = soup.select_one("#productDetails_feature_div table") or soup.select_one("#prodDetails table")
+            product.feature_table = self.parse_table(product_table) if product_table else None 
 
-        color_elements = soup.select("#variation_color_name ul img")
-        details["colors"] = [
-            {"color": color.get("alt", ""), "img": color.get("src", "")}
-            for color in color_elements
-        ] if color_elements else None
+            sizes = soup.select_one("#variation_size_name")
+            if sizes:
+                options = sizes.find_all("option")
+                product.sizes= [option.text for option in options[1:]] if options else None
 
-        description_element = soup.select_one("#productDescription p")
-        details["description"] = description_element.text.strip() if description_element else None
+            availability = soup.select_one('#availability')
+            if availability:
+                product.stock = True if availability.text.strip()==' En stock' else False
 
-        return [details]
+            bullet_elements = soup.select("#feature-bullets li")
+            product.feature_bullet = [li.text.strip() for li in bullet_elements] if bullet_elements else None
 
+            color_elements = soup.select("#variation_color_name ul img")
+            product.colors = [
+                {"color": color.get("alt", ""), "img": color.get("src", "")}
+                for color in color_elements
+            ] if color_elements else None
+
+            description_element = soup.select_one("#productDescription p")
+            product.description = description_element.text.strip() if description_element else None
+
+            return [product.to_dict()]
+        
+        except Exception as e:
+            logging.error(f"Erreur extraction detail article Amazon: {str(e)}")
+            return []
+        
     async def get_detail(self, product_url) -> List[Dict[str, Any]]:
         content = await self.get_page_content(product_url)
         await self.__aexit__()

@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 from typing import List, Dict, Any, Optional
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -11,6 +12,8 @@ from bs4 import BeautifulSoup
 from .BaseScraper import BaseScraper  # Assuming this is your base class
 from app.bd_scraping_arbook.database import init_db
 from app.bd_scraping_arbook.models_vinted import Product
+
+from .utils import Product
 
 
 async def save_to_mongo(products: list[dict]):
@@ -25,19 +28,24 @@ async def save_to_mongo(products: list[dict]):
         try:
             # Mise à jour si le produit existe déjà, sinon insertion
             result = await Product.get_motor_collection().replace_one(
-                {"product_id": item["product_id"]},  # Vérifie l'existence par product_id
+                {
+                    "product_id": item["product_id"]
+                },  # Vérifie l'existence par product_id
                 item,  # Remplace ou insère l'élément
-                upsert=True  # Insère si le produit n'existe pas encore
+                upsert=True,  # Insère si le produit n'existe pas encore
             )
 
             if result.matched_count > 0:
-                print(f" Produit {item['title']} ({item['product_id']}) mis à jour avec succès !")
+                print(
+                    f" Produit {item['title']} ({item['product_id']}) mis à jour avec succès !"
+                )
             else:
-                print(f" Produit {item['title']} ({item['product_id']}) inséré avec succès !")
+                print(
+                    f" Produit {item['title']} ({item['product_id']}) inséré avec succès !"
+                )
 
         except Exception as e:
             print(f" Erreur lors de l'insertion MongoDB pour Vinted : {e}")
-
 
 
 class VintedScraper(BaseScraper):
@@ -84,7 +92,6 @@ class VintedScraper(BaseScraper):
             )  # More specific error message
             return ""
 
-
     async def search(self, query: str, limit: int = 100) -> List[Dict[str, Any]]:
         produits = []
         params = {
@@ -118,166 +125,175 @@ class VintedScraper(BaseScraper):
 
         return produits
 
-
     def parse_item(self, item) -> Optional[Dict[str, Any]]:
+        product = Product(source="vinted")
         try:
-            # Vendeur
-            # seller_element = item.select_one('div[data-testid*="owner"]')
-            # seller = seller_element.text.strip() if seller_element else None
-            # seller_url = seller_element.select_one("a").get("href") if seller_element else None
-
-            # URL du produit
-            link_element = item.select_one("a.new-item-box__overlay")
-            product_url = (link_element.get("href")
-                if link_element and link_element.get("href")
-                else None
-            )
-
             # ID du produit (data-testid)
             product_id_element = item.select_one(
                 '[data-testid*="product-item-id"]'
             )  # Select by partial attribute
-            product_id = (
+            product.product_id = (
                 product_id_element.get("data-testid").split("--")[0].split("-")[-1]
                 if product_id_element
                 else None
-            )  # Extract ID
-
-            # Image URL
-            image_element = item.select_one("img.web_ui__Image__content")
-            image_url = image_element.get("src") if image_element else None
+            )
 
             # Titre (plusieurs options car la structure peut varier)
             title_element = item.select_one(
                 ".new-item-box__description p.web_ui__Text__text"
             )
-            title = title_element.text.strip() if title_element else None
+            product.name = title_element.text.strip() if title_element else None
 
             # Prix
             price_element = item.select_one('p[data-testid*="--price-text"]')
-            price = price_element.text.strip() if price_element else None
+            product.price = price_element.text.strip() if price_element else None
+
+            # URL du produit
+            link_element = item.select_one("a.new-item-box__overlay")
+            product.url = (
+                link_element.get("href")
+                if link_element and link_element.get("href")
+                else None
+            )
+
+            # Image URL
+            image_element = item.select_one("img.web_ui__Image__content")
+            product.main_photo = image_element.get("src") if image_element else None
+
+            #  Description
+            description = item.select_one('p[data-testid*="description-subtitle"]')
+            product.description = description.text.strip() if description else None
+
+            # prix avec protection
             price_element_pro = item.select_one(
                 'button[aria-label*="Protection"]>span>span'
             )
-            price_pro = price_element_pro.text.strip() if price_element else None
+            product.price_with_protection = (
+                price_element_pro.text.strip() if price_element else None
+            )
 
-            #  Description (peut être absente)
-            description = item.select_one('p[data-testid*="description-subtitle"]')
-            description = description.text.strip() if description else None
-
-            if product_url and product_id and title and price:
-                logging.info(
-                    f" Article Vinted: {title} - {price} - {product_url[:20]}..."
-                )
-                return {
-                    "source": "vinted",
-                    "product_id": product_id,
-                    "title": title,
-                    "price": price,
-                    "price_with_protection": price_pro,
-                    # "seller": seller,
-                    # "seller_url": seller_url,
-                    "description": description,
-                    "product_url": product_url,
-                    "image_url": image_url,
-                }
+            if product.is_valid():
+                logging.info(product)
+                return product.to_dict()
             return None
 
         except Exception as e:
             logging.error(f"Erreur extraction article Vinted: {str(e)}")
             return None
 
-    def parse_detail(self, item, photos, categories) -> List[Dict[str, Any]]:
-        
-        detail_container = item.select_one("div.details-list.details-list--details")
-        if not detail_container:
+    def parse_detail(self, soup) -> List[Dict[str, Any]]:
+        product = Product(source="vinted")
+        try:
+            # Extract the canonical link for the product URL
+            canonical_link = soup.select_one('link[rel="canonical"]')
+            if canonical_link:
+                canonical_url = canonical_link["href"]
+                product.url = canonical_url
+                product.product_id = canonical_url.split("/")[-1]
+
+            # Extract product name
+            name = soup.select_one('aside div[data-testid="item-page-summary-plugin"] div span')
+            product.name = name.text.strip() if name else None
+
+            # Extract detail container for further information
+            detail_container = soup.select_one("aside div.details-list.details-list--details")
+            if not detail_container:
+                return []
+
+            # Determine stock status based on the presence of status element
+            status = detail_container.select_one('div[data-testid="item-status--content"]')
+            product.stock = False if status else True
+
+            # Extract price information
+            price = soup.select_one('aside div[data-testid="item-price"]')
+            product.price = price.text.strip().replace("\xa0", " ") if price else None
+
+            # Extract price with protection information
+            price_protection = soup.select_one('aside button[aria-label*="Protection"] > div')
+            product.price_with_protection = (
+                price_protection.text.strip().replace("\xa0", " ")
+                if price_protection
+                else None
+            )
+
+            # Extract categories from breadcrumbs
+            categories = soup.select("ul.breadcrumbs.breadcrumbs--truncated a")
+            if categories:
+                product.categories = [categorie.text.strip() for categorie in categories][1:]
+
+            # Extract detailed photos
+            photos = soup.select_one("section.item-photos__container")
+            if photos:
+                imgs = photos.find_all("img")
+                product.detailed_photos = [img.get("src") for img in imgs]
+
+            # Extract additional product details
+            brand_element = detail_container.select_one('span[itemprop="name"]')
+            product.brand = brand_element.text.strip() if brand_element else None
+
+            # Extract sizes
+            size_element = detail_container.select_one('div[itemprop="size"]')
+            product.sizes = size_element.text.strip() if size_element else None
+
+            #Extract product condition
+            condition_element = detail_container.select_one('div[itemprop="status"]')
+            product.condition = condition_element.text.strip() if condition_element else None
+
+            # Extract product color
+            color_element = detail_container.select_one('div[itemprop="color"]')
+            product.colors = color_element.text.strip() if color_element else None
+
+            # Extract view count
+            views_element = detail_container.select_one('div[itemprop="view_count"]')
+            product.views = int(views_element.text.strip()) if views_element else None
+
+            # Extract interested count
+            interested_element = detail_container.select_one('div[itemprop="interested"]')
+            product.interested = (
+                int(interested_element.text.strip().split(" ")[0]) if interested_element else None
+            )
+
+            # Extract payment methods
+            payment_element = detail_container.select_one('div[itemprop="payment_methods"] span')
+            product.payment_methods = payment_element.text.strip() if payment_element else None
+
+            # Extract uploaded date
+            uploaded_element = detail_container.select_one('div[data-testid="item-attributes-upload_date"] [itemprop="upload_date"]')
+            product.uploaded = (
+                {
+                    "scraped": datetime.now().strftime("%Y-%m-%d"),
+                    "time": uploaded_element.text.strip(),
+                }
+                if uploaded_element
+                else None
+            )
+
+            # Extract delivery price
+            delivery_element = soup.select_one('aside [data-testid="item-shipping-banner-price"]')
+            product.delivery_price = delivery_element.text.strip().replace("\xa0", " ") if delivery_element else None
+
+            # Extract product description
+            description_element = soup.select_one('aside div[itemprop="description"]')
+            product.description = description_element.text.strip().replace("\n", "") if description_element else None
+
+            # Extract owner information
+            owner_name = soup.select_one('aside [data-testid="profile-username"]')
+            product.owner_name = owner_name.text.strip() if owner_name else ""
+
+            owner_link_element = soup.select_one("aside a.web_ui__Cell__cell.web_ui__Cell__default.web_ui__Cell__navigating.web_ui__Cell__with-chevron.web_ui__Cell__link")
+            owner_url = owner_link_element.get("href") if owner_link_element else None
+            if owner_url:
+                owner_url = self.BASE_URL + owner_url
+            product.owner_profile_url = owner_url
+
+            # Validate the product before returning
+            if product.is_valid():
+                return [product.to_dict()]
+            else:
+                return []
+        except Exception as e:
+            logging.error(f"Erreur extraction detail article Vinted: {str(e)}")
             return []
-
-        details = {}
-    
-        if categories:
-            categories = categories.select('a')
-            details['categorie'] = [categorie.text.strip() for  categorie in categories]
-
-        if photos:
-            imgs = photos.find_all('img')
-            details['photos'] = [img.get('src') for img in imgs]
-
-
-        status = item.select_one('div[data-testid="item-status--content"]')
-        details["status"] = status.text.strip() if status else "Disponible"
-
-        price = item.select_one('div[data-testid="item-price"]')
-        details["price"] = price.text.strip().replace("\xa0", " ") if price else None
-
-        price_protection = item.select_one('button[aria-label*="Protection"] > div')
-        details["price_with_protection"] = (
-            price_protection.text.strip().replace("\xa0", " ")
-            if price_protection
-            else None
-        )
-
-        # Extract Brand
-        brand_element = detail_container.select_one('span[itemprop="name"]')
-        details["brand"] = brand_element.text.strip() if brand_element else None
-
-        # Extract Size
-        size_element = detail_container.select_one('div[itemprop="size"]')
-        details["size"] = size_element.text.strip() if size_element else None
-
-        condition_element = detail_container.select_one('div[itemprop="status"]')
-        details["condition"] = (
-            condition_element.text.strip() if condition_element else None
-        )
-
-        color_element = detail_container.select_one('div[itemprop="color"]')
-        details["color"] = color_element.text.strip() if color_element else None
-
-        views_element = detail_container.select_one('div[itemprop="view_count"]')
-        details["views"] = int(views_element.text.strip()) if views_element else None
-
-        interested_element = detail_container.select_one('div[itemprop="interested"]')
-        details["interested"] = (
-            int(interested_element.text.strip().split(" ")[0])
-            if interested_element
-            else None
-        )
-
-        payment_element = detail_container.select_one('div[itemprop="payment_methods"]')
-        details["payment"] = payment_element.text.strip() if payment_element else None
-
-        # Extract Uploaded Date
-        uploaded_element = detail_container.select_one(
-            'div[data-testid="item-attributes-upload_date"] [itemprop="upload_date"]'
-        )
-        details["uploaded"] = (
-            uploaded_element.text.strip() if uploaded_element else None
-        )
-        # Extract Delivery Price
-        delivery_element = item.select_one('[data-testid="item-shipping-banner-price"]')
-        details["delivery"] = (
-            delivery_element.text.strip().replace("\xa0", " ")
-            if delivery_element
-            else None
-        )
-
-        description_element = item.select_one('div[itemprop="description"]')
-        details["description"] = (
-            description_element.text.strip().replace('\n', '') if description_element else None
-        )
-
-        owner_name = item.select_one('[data-testid="profile-username"]')
-        details["owner_name"] = owner_name.text.strip() if owner_name else ""
-
-        owner_link_element = item.select_one(
-            "a.web_ui__Cell__cell.web_ui__Cell__default.web_ui__Cell__navigating.web_ui__Cell__with-chevron.web_ui__Cell__link"
-        )
-        owner_url = owner_link_element.get("href") if owner_link_element else None
-        if owner_url:
-            owner_url = self.BASE_URL + owner_url
-        details["owner_profile_url"] = owner_url
-        
-        return [details]
 
     async def get_detail(self, product_url: str) -> List[Dict[str, Any]]:
         logging.info("Obtenir la page contenant les detail du produits")
@@ -285,14 +301,10 @@ class VintedScraper(BaseScraper):
         if not content:
             return []
         soup = BeautifulSoup(content, "lxml")
-        aside = soup.select_one("aside")
-        if not aside:
-            return []
-        
-        categorie = soup.select_one('ul.breadcrumbs.breadcrumbs--truncated')
-        photos = soup.select_one("section.item-photos__container")
-        logging.info("Extraction des informatons importante")
-        return self.parse_detail(aside, photos, categorie)
+
+        logging.info("Extraction des informations importantes")
+        return self.parse_detail(soup)
+
 
 
 vinted_scraper = VintedScraper()
