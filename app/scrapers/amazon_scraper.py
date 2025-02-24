@@ -190,6 +190,10 @@ class AmazonScraper(BaseScraper):
     def parse_details(self, soup):
         details = {}
         
+        asin = soup.select_one('#all-offers-display-params')
+        if asin:
+            details['product_id'] = asin.get('data-asin')
+        
         price_element = soup.select_one('div[id*="corePrice"] .a-offscreen, div[id*="corePrice"] .aok-offscreen')  # Combine selectors
         details["price"] = price_element.text.strip() if price_element else None
 
@@ -213,7 +217,7 @@ class AmazonScraper(BaseScraper):
 
         availability = soup.select_one('#availability')
         if availability:
-            details['available'] = True if availability.text.strip()==' En stock' else False
+            details['stock'] = True if availability.text.strip()==' En stock' else False
 
         bullet_elements = soup.select("#feature-bullets li")
         details["bullet_feature"] = [li.text.strip() for li in bullet_elements] if bullet_elements else None
