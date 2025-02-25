@@ -1,10 +1,28 @@
-from typing import List, Dict, Any, Optional
-import logging
-import aiohttp
-from bs4 import BeautifulSoup
-from .BaseScraper import BaseScraper
-from app.bd_scraping_arbook.database import init_db
+# from typing import List, Dict, Any, Optional
+# import logging
+# import aiohttp
+# from bs4 import BeautifulSoup
+# from .BaseScraper import BaseScraper
+# from app.bd_scraping_arbook.database import init_db
 from app.bd_scraping_arbook.models_amazon import AmazonProduct
+# from .utils import Product
+
+
+import logging
+from datetime import datetime
+from typing import List, Dict, Any, Optional
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
+from bs4 import BeautifulSoup
+from .BaseScraper import BaseScraper  # Assuming this is your base class
+from app.bd_scraping_arbook.database import init_db
+from app.bd_scraping_arbook.models_vinted import Product
+
 from .utils import Product
 
 
@@ -22,18 +40,20 @@ async def save_to_mongo(products: list[dict]):
             result = await AmazonProduct.get_motor_collection().replace_one(
                 {"product_id": item["product_id"]},  # Vérifie l'existence
                 item,  # Remplace le document s'il existe, insère sinon
-                upsert=True  # Assure que l'opération est atomique
+                upsert=True,  # Assure que l'opération est atomique
             )
 
             if result.matched_count > 0:
-                print(f" Produit {item['name']} ({item['product_id']}) mis à jour avec succès !")
+                print(
+                    f" Produit {item['name']} ({item['product_id']}) mis à jour avec succès !"
+                )
             else:
-                print(f" Produit {item['name']} ({item['product_id']}) inséré avec succès !")
+                print(
+                    f" Produit {item['name']} ({item['product_id']}) inséré avec succès !"
+                )
 
         except Exception as e:
             print(f" Erreur lors de l'insertion MongoDB : {e}")
-
-
 
 
 class AmazonScraper(BaseScraper):
@@ -58,33 +78,43 @@ class AmazonScraper(BaseScraper):
         "ect": "4g",
     }
 
+    def __init__(self):
+        """Initialisation du navigateur avec les options."""
+        options = Options()
+        options.add_argument(
+            "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
+        )
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_argument("--headless")  # Set to False to see the browser
+        options.add_argument("--disable-popup-blocking")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-infobars")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--start-maximized")
+        options.add_argument("--log-level=3")  # Reduce unnecessary logs
+
+        service = Service(ChromeDriverManager().install())
+        self.driver = webdriver.Chrome(service=service, options=options)
+
     async def __aenter__(self):
-        """Initialisation de la session."""
-        self.session = aiohttp.ClientSession(headers=self.HEADERS)
         return self
 
     async def __aexit__(self, *excinfo):
-        """Fermeture de la session."""
-        if hasattr(self, "session") and self.session:
-            await self.session.close()
+        self.driver.quit()
 
-    async def get_page_content(self, url: str) -> str:
-        """Obtenir le contenu d'une page."""
-        await self.__aenter__()
+    async def get_page_content(self, url: str, wait_for: str) -> str:
+        """Récupérer le contenu de la page avec Selenium et gestion des erreurs."""
         try:
-            async with self.session.get(url, ssl=False) as response:
-                if response.status >= 400:
-                    text = await response.text()
-                    logging.error(f"HTTP {response.status} pour {url}: {text}")
-                    return ""
-                return await response.text()
-
-        except aiohttp.ClientError as e:
-            logging.error(f"Erreur de requête pour {url}: {e}")
-
-            return ""
+            self.driver.get(url)
+            WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, wait_for))
+            )
+            return self.driver.page_source
         except Exception as e:
-            logging.error(f"Erreur de chargement de la page {url}: {str(e)}")
+            logging.error(
+                f"Erreur lors du chargement de la page {url} : {str(e)}"
+            )  # More specific error message
             return ""
 
     async def search(self, query: str, limit: int = 100) -> List[Dict[str, Any]]:
@@ -98,8 +128,8 @@ class AmazonScraper(BaseScraper):
         try:
             logging.info(f" Recherche de '{query}' sur Amazon!")
             content = await self.get_page_content(
-                f"{self.SEARCH_URL}?{self._encode_params(params)}"
-            )
+                f"{self.SEARCH_URL}?{self._encode_params(params)}",
+            'div[data-component-type="s-search-result"]')
             if not content:
                 return products
 
@@ -111,8 +141,8 @@ class AmazonScraper(BaseScraper):
                 product = self.parse_item(item)
                 if product:
                     products.append(product)
-            
-            if products :
+
+            if products:
                 logging.info(" Enregistrement des produits dans MongoDB...")
                 await save_to_mongo(products)
 
@@ -122,7 +152,7 @@ class AmazonScraper(BaseScraper):
         return products
 
     def parse_item(self, item) -> Optional[Dict[str, Any]]:
-        product = Product(source='amazon')
+        product = Product(source="amazon")
         try:
             # Get product id
             asin = item.get("data-asin", "")
@@ -130,11 +160,12 @@ class AmazonScraper(BaseScraper):
 
             # Titre
             product.name = item.h2.text.strip() if item.h2 else ""
-            
 
             livraison = item.select_one('div[data-cy="delivery-recipe"]')
             livraison = livraison.text if livraison else None
-            product.delivery_price = "".join(livraison.strip().split(" ")[2:]) if livraison else None
+            product.delivery_price = (
+                "".join(livraison.strip().split(" ")[2:]) if livraison else None
+            )
 
             # URL du produit
             href = item.select_one("a.a-link-normal").get("href", "")
@@ -182,60 +213,87 @@ class AmazonScraper(BaseScraper):
         return {th: td for th, td in zip(headers, rows)}
 
     def parse_details(self, soup):
-        product = Product(source='amazon')
+        product = Product(source="amazon")
         try:
             canonical_link = soup.select_one('link[rel="canonical"]')
-            product.url = canonical_link.get('href') if canonical_link else None
-            
-            asin = soup.select_one('#all-offers-display-params')
+            product.url = canonical_link.get("href") if canonical_link else None
+
+            asin = soup.select_one("#all-offers-display-params")
             if asin:
-                product.product_id = asin.get('data-asin')
-            
-            price_element = soup.select_one('div[id*="corePrice"] .a-offscreen, div[id*="corePrice"] .aok-offscreen')  # Combine selectors
+                product.product_id = asin.get("data-asin")
+
+            price_element = soup.select_one(
+                'div[id*="corePrice"] .a-offscreen, div[id*="corePrice"] .aok-offscreen'
+            )  # Combine selectors
             product.price = price_element.text.strip() if price_element else None
 
             category_elements = soup.select("#wayfinding-breadcrumbs_feature_div a")
-            product.categories = [cat.text.strip() for cat in category_elements] if category_elements else None
+            product.categories = (
+                [cat.text.strip() for cat in category_elements]
+                if category_elements
+                else None
+            )
 
             title_element = soup.select_one("#productTitle")
             product.name = title_element.text.strip() if title_element else None
-            
-            image_elements = soup.select("#main-image-container img") + soup.select("#altImages img")
-            product.detailed_photos = [img.get('src') for img in image_elements if img.get('src')] if image_elements else None
 
-                
-            product_table = soup.select_one("#productDetails_feature_div table") or soup.select_one("#prodDetails table")
-            product.feature_table = self.parse_table(product_table) if product_table else None 
+            image_elements = soup.select("#main-image-container img") + soup.select(
+                "#altImages img"
+            )
+            product.detailed_photos = (
+                [img.get("src") for img in image_elements if img.get("src")]
+                if image_elements
+                else None
+            )
+
+            product_table = soup.select_one(
+                "#productDetails_feature_div table"
+            ) or soup.select_one("#prodDetails table")
+            product.feature_table = (
+                self.parse_table(product_table) if product_table else None
+            )
 
             sizes = soup.select_one("#variation_size_name")
             if sizes:
                 options = sizes.find_all("option")
-                product.sizes= [option.text for option in options[1:]] if options else None
+                product.sizes = (
+                    [option.text for option in options[1:]] if options else None
+                )
 
-            availability = soup.select_one('#availability')
+            availability = soup.select_one("#availability")
             if availability:
-                product.stock = True if availability.text.strip()==' En stock' else False
+                product.stock = (
+                    True if availability.text.strip() == " En stock" else False
+                )
 
             bullet_elements = soup.select("#feature-bullets li")
-            product.feature_bullet = [li.text.strip() for li in bullet_elements] if bullet_elements else None
+            product.feature_bullet = (
+                [li.text.strip() for li in bullet_elements] if bullet_elements else None
+            )
 
             color_elements = soup.select("#variation_color_name ul img")
-            product.colors = [
-                {"color": color.get("alt", ""), "img": color.get("src", "")}
-                for color in color_elements
-            ] if color_elements else None
+            product.colors = (
+                [
+                    {"color": color.get("alt", ""), "img": color.get("src", "")}
+                    for color in color_elements
+                ]
+                if color_elements
+                else None
+            )
 
             description_element = soup.select_one("#productDescription p")
-            product.description = description_element.text.strip() if description_element else None
+            product.description = (
+                description_element.text.strip() if description_element else None
+            )
 
             return [product.to_dict()]
-        
+
         except Exception as e:
             logging.error(f"Erreur extraction detail article Amazon: {str(e)}")
             return []
-        
+
     async def get_detail(self, product_url) -> List[Dict[str, Any]]:
-        content = await self.get_page_content(product_url)
+        content = await self.get_page_content(product_url, "#navFooter")
         await self.__aexit__()
         if not content:
             return []
