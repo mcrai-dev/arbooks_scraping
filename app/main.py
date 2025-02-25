@@ -157,10 +157,10 @@ async def search_products(
     if platform=='all':
         return await search_all_platforms(query, limit)
     
-    if platform not in PLATFORM_SCRAPERS.keys()+['all']:
+    if platform not in list(PLATFORM_SCRAPERS.keys())+['all']:
         raise HTTPException(
             status_code=400,
-            detail=f"Platform '{platform}' not supported. Available platforms: {list(['all']+PLATFORM_SCRAPERS.keys())}",
+            detail=f"Platform '{platform}' not supported. Available platforms: {['all']+list(PLATFORM_SCRAPERS.keys())}",
         )
     try:
         scraper = PLATFORM_SCRAPERS[platform]

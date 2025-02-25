@@ -91,9 +91,9 @@ class AmazonScraper(BaseScraper):
         products = []
         params = {
             "k": query,
-            # "ref": "nb_sb_noss",
-            # "sprefix": f"{query},aps,283",
-            # "crid": "2M7LQQC1YQLR0",
+            "ref": "nb_sb_noss",
+            "sprefix": f"{query},aps,283",
+            "crid": "2M7LQQC1YQLR0",
         }
         try:
             logging.info(f" Recherche de '{query}' sur Amazon!")
