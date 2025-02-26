@@ -1,12 +1,3 @@
-# from typing import List, Dict, Any, Optional
-# import logging
-# import aiohttp
-# from bs4 import BeautifulSoup
-# from .BaseScraper import BaseScraper
-# from app.bd_scraping_arbook.database import init_db
-from app.bd_scraping_arbook.models_amazon import AmazonProduct
-# from .utils import Product
-
 
 import logging
 from datetime import datetime
@@ -20,40 +11,40 @@ from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 from .BaseScraper import BaseScraper  # Assuming this is your base class
-from app.bd_scraping_arbook.database import init_db
-from app.bd_scraping_arbook.models_vinted import Product
-
+#from app.bd_scraping_arbook.models_vinted import Product
+from app.bd_scraping_arbook.models_scraping import Product_scraping
 from .utils import Product
 
 
-async def save_to_mongo(products: list[dict]):
+async def save_to_mongo(db_manager, products: list[dict]):
     """Insère les produits scrappés dans MongoDB en évitant les doublons (mise à jour si déjà existant)."""
-    await init_db()  # S'assurer que la DB est connectée
-
+    
+    if not db_manager.is_initialized():  #  Vérifie l'initialisation
+        success = await db_manager.initialize()
+        if not success:
+            logging.error("Échec de l'initialisation de la base de données. Annulation de l'insertion.")
+            return
+    
     if not products:
-        print(" Aucun produit à enregistrer dans MongoDB.")
+        logging.info("Aucun produit à enregistrer dans MongoDB.")
         return
 
     for item in products:
         try:
-            # Utilisation de replace_one() avec upsert=True pour gérer la mise à jour et éviter les erreurs de duplication
-            result = await AmazonProduct.get_motor_collection().replace_one(
-                {"product_id": item["product_id"]},  # Vérifie l'existence
-                item,  # Remplace le document s'il existe, insère sinon
-                upsert=True,  # Assure que l'opération est atomique
-            )
+            # Vérifier si le produit existe déjà
+            existing_product = await Product_scraping.find_one({"product_id": item["product_id"]})
 
-            if result.matched_count > 0:
-                print(
-                    f" Produit {item['name']} ({item['product_id']}) mis à jour avec succès !"
-                )
+            if existing_product:
+                await existing_product.set(item)  #  Mise à jour
+                logging.info(f"Produit {item['name']} ({item['product_id']}) mis à jour avec succès !")
             else:
-                print(
-                    f" Produit {item['name']} ({item['product_id']}) inséré avec succès !"
-                )
+                new_product = Product_scraping(**item)
+                await new_product.insert()  #  Insertion
+                logging.info(f"Produit {item['name']} ({item['product_id']}) inséré avec succès !")
 
         except Exception as e:
-            print(f" Erreur lors de l'insertion MongoDB : {e}")
+            logging.error(f"Erreur lors de l'insertion du produit {item.get('product_id', 'inconnu')}: {e}")
+
 
 
 class AmazonScraper(BaseScraper):
@@ -78,7 +69,8 @@ class AmazonScraper(BaseScraper):
         "ect": "4g",
     }
 
-    def __init__(self):
+    def __init__(self,db_manager):
+        self.db_manager = db_manager
         """Initialisation du navigateur avec les options."""
         options = Options()
         options.add_argument(
@@ -144,7 +136,7 @@ class AmazonScraper(BaseScraper):
 
             if products:
                 logging.info(" Enregistrement des produits dans MongoDB...")
-                await save_to_mongo(products)
+                await save_to_mongo(self.db_manager,products)
 
         except Exception as e:
             logging.error(f"Erreur lors du scraping d'Amazon: {str(e)}")
@@ -215,90 +207,167 @@ class AmazonScraper(BaseScraper):
     def parse_details(self, soup):
         product = Product(source="amazon")
         try:
+            # Récupérer l'URL canonique du produit
             canonical_link = soup.select_one('link[rel="canonical"]')
             product.url = canonical_link.get("href") if canonical_link else None
 
-            asin = soup.select_one("#all-offers-display-params")
-            if asin:
-                product.product_id = asin.get("data-asin")
+            #  Extraction de l'ASIN (ID du produit)
+            product.product_id = None
 
+            #  Méthode principale : `#all-offers-display-params`
+            asin_element = soup.select_one("#all-offers-display-params")
+            if asin_element:
+                product.product_id = asin_element.get("data-asin")
+
+            #  Méthode alternative : `input[name="ASIN"]`
+            if not product.product_id:
+                asin_input = soup.select_one('input[name="ASIN"]')
+                if asin_input:
+                    product.product_id = asin_input.get("value")
+
+            #  Vérification finale
+            if not product.product_id:
+                logging.warning(f" Impossible de récupérer l'ID du produit pour {product.url}.")
+
+            # Récupérer le prix du produit
             price_element = soup.select_one(
                 'div[id*="corePrice"] .a-offscreen, div[id*="corePrice"] .aok-offscreen'
-            )  # Combine selectors
+            )
             product.price = price_element.text.strip() if price_element else None
 
+            # Catégories
             category_elements = soup.select("#wayfinding-breadcrumbs_feature_div a")
             product.categories = (
-                [cat.text.strip() for cat in category_elements]
-                if category_elements
-                else None
+                [cat.text.strip() for cat in category_elements] if category_elements else None
             )
 
+            # Nom du produit
             title_element = soup.select_one("#productTitle")
             product.name = title_element.text.strip() if title_element else None
 
-            image_elements = soup.select("#main-image-container img") + soup.select(
-                "#altImages img"
-            )
+            # Photos détaillées
+            image_elements = soup.select("#main-image-container img") + soup.select("#altImages img")
             product.detailed_photos = (
-                [img.get("src") for img in image_elements if img.get("src")]
-                if image_elements
-                else None
+                [img.get("src") for img in image_elements if img.get("src")] if image_elements else None
             )
 
-            product_table = soup.select_one(
-                "#productDetails_feature_div table"
-            ) or soup.select_one("#prodDetails table")
-            product.feature_table = (
-                self.parse_table(product_table) if product_table else None
-            )
+            # Table des caractéristiques
+            product_table = soup.select_one("#productDetails_feature_div table") or soup.select_one("#prodDetails table")
+            product.feature_table = self.parse_table(product_table) if product_table else None
 
-            sizes = soup.select_one("#variation_size_name")
-            if sizes:
-                options = sizes.find_all("option")
-                product.sizes = (
-                    [option.text for option in options[1:]] if options else None
-                )
-
-            availability = soup.select_one("#availability")
-            if availability:
-                product.stock = (
-                    True if availability.text.strip() == " En stock" else False
-                )
-
-            bullet_elements = soup.select("#feature-bullets li")
-            product.feature_bullet = (
-                [li.text.strip() for li in bullet_elements] if bullet_elements else None
-            )
-
+            # Couleurs disponibles
             color_elements = soup.select("#variation_color_name ul img")
+
+            # Extraire uniquement le nom des couleurs (List[str])
             product.colors = (
-                [
-                    {"color": color.get("alt", ""), "img": color.get("src", "")}
-                    for color in color_elements
-                ]
+                [color.get("alt", "").strip() for color in color_elements if color.get("alt")]
                 if color_elements
                 else None
             )
 
-            description_element = soup.select_one("#productDescription p")
-            product.description = (
-                description_element.text.strip() if description_element else None
+            # Si tu veux stocker aussi les images, utilise un autre champ `colors_images`
+            product.colors_images = (
+                {color.get("alt", "").strip(): color.get("src", "") for color in color_elements if color.get("alt")}
+                if color_elements
+                else None
             )
+
+
+
+            # Description du produit
+            description_element = soup.select_one("#productDescription p")
+            product.description = description_element.text.strip() if description_element else None
 
             return [product.to_dict()]
 
         except Exception as e:
-            logging.error(f"Erreur extraction detail article Amazon: {str(e)}")
+            logging.error(f" Erreur extraction détail article Amazon : {str(e)}")
             return []
 
-    async def get_detail(self, product_url) -> List[Dict[str, Any]]:
+
+    # async def get_detail(self, product_url) -> List[Dict[str, Any]]:
+    #     content = await self.get_page_content(product_url, "#navFooter")
+    #     await self.__aexit__()
+    #     if not content:
+    #         return []
+    #     soup = BeautifulSoup(content, "lxml")
+    #     return self.parse_details(soup)
+
+    async def get_detail(self, product_url: str) -> List[Dict[str, Any]]:
+        """Récupère et met à jour les détails d'un produit Amazon."""
+        
+        logging.info(f" Récupération du produit : {product_url}")
         content = await self.get_page_content(product_url, "#navFooter")
-        await self.__aexit__()
+        
         if not content:
+            logging.warning(f" Aucun contenu récupéré pour {product_url}.")
             return []
+
         soup = BeautifulSoup(content, "lxml")
-        return self.parse_details(soup)
+        details = self.parse_details(soup)
 
+        if not details:
+            logging.warning(f" Impossible d'extraire les détails du produit {product_url}.")
+            return []
 
-amazon_scraper = AmazonScraper()
+        logging.info(f" Détails extraits : {details}")
+
+        #  Correction : Utilisation de update_product_details()
+        updated_details = await self.update_product_details(details[0])  
+
+        return [updated_details]  # Toujours retourner une liste
+
+    
+    async def update_product_details(self, detailed_product: Dict[str, Any]) -> Dict[str, Any]:
+        """Met à jour MongoDB avec les nouvelles données du produit Amazon."""
+        try:
+            if not isinstance(detailed_product, dict):
+                logging.error(f" Erreur: `detailed_product` n'est pas un dictionnaire ! Type reçu : {type(detailed_product)}")
+                return {}
+
+            product_id = detailed_product.get("product_id")
+            if not product_id:
+                logging.warning(" Impossible de récupérer l'ID du produit.")
+                return {}
+
+            #  Vérifier que MongoDB est bien initialisé
+            if not self.db_manager.is_initialized():
+                logging.info("🛠️ Initialisation de MongoDB avec Beanie...")
+                await self.db_manager.initialize()
+
+            #  Correction : Convertir `uploaded` en `str` si c'est un `dict`
+            if "uploaded" in detailed_product and isinstance(detailed_product["uploaded"], dict):
+                uploaded_data = detailed_product["uploaded"]
+                detailed_product["uploaded"] = f"{uploaded_data.get('scraped', 'N/A')} - {uploaded_data.get('time', 'N/A')}"
+
+            #  Rechercher si le produit existe déjà en base
+            existing_product = await Product_scraping.find_one({"product_id": product_id})
+
+            if existing_product:
+                updated_fields = {
+                    k: v for k, v in detailed_product.items()
+                    if getattr(existing_product, k, None) != v and v is not None
+                }
+
+                if updated_fields:
+                    try:
+                        await existing_product.set(updated_fields)
+                        logging.info(f" Produit {product_id} mis à jour avec {len(updated_fields)} nouvelles valeurs.")
+                    except Exception as e:
+                        logging.error(f" Erreur lors de la mise à jour du produit `{product_id}` dans MongoDB : {e}")
+                else:
+                    logging.info(f"ℹ️ Aucun changement détecté pour {product_id}.")
+            else:
+                try:
+                    new_product = Product_scraping(**detailed_product)
+                    await new_product.insert()
+                    logging.info(f"🆕 Produit {product_id} ajouté en base.")
+                except Exception as e:
+                    logging.error(f" Erreur lors de l'insertion du produit `{product_id}` dans MongoDB : {e}")
+
+            return detailed_product  
+
+        except Exception as e:
+            logging.error(f" Erreur inattendue lors de la mise à jour du produit `{product_id}` : {e}")
+            return {}
+

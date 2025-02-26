@@ -10,50 +10,52 @@ from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 from .BaseScraper import BaseScraper  # Assuming this is your base class
-from app.bd_scraping_arbook.database import init_db
-from app.bd_scraping_arbook.models_vinted import Product
+from app.bd_scraping_arbook.models_scraping import Product_scraping
+import traceback
 
 from .utils import Product
 
 
-async def save_to_mongo(products: list[dict]):
-    """Insère les produits Vinted scrappés dans MongoDB en évitant les doublons."""
-    await init_db()  # S'assurer que la DB est connectée
-
+async def save_to_mongo(db_manager,products: list[dict]):
+    """Insère les produits scrappés dans MongoDB en évitant les doublons (mise à jour si déjà existant)."""
+    
+    # Initialiser la base de données si ce n'est pas déjà fait
+    if not db_manager.is_initialized():
+        success = await db_manager.initialize()
+        if not success:
+            logging.error("Échec de l'initialisation de la base de données. Annulation de l'insertion.")
+            return
+    
     if not products:
-        print(" Aucun produit à enregistrer dans MongoDB.")
+        logging.info("Aucun produit à enregistrer dans MongoDB.")
         return
 
     for item in products:
         try:
-            # Mise à jour si le produit existe déjà, sinon insertion
-            result = await Product.get_motor_collection().replace_one(
-                {
-                    "product_id": item["product_id"]
-                },  # Vérifie l'existence par product_id
-                item,  # Remplace ou insère l'élément
-                upsert=True,  # Insère si le produit n'existe pas encore
-            )
+            # Utilisation de Beanie pour insérer ou mettre à jour le produit
+            existing_product = await Product_scraping.find_one({"product_id": item["product_id"]})
+            logging.info(f"{existing_product} -{item['product_id']} ")
 
-            if result.matched_count > 0:
-                print(
-                    f" Produit {item['title']} ({item['product_id']}) mis à jour avec succès !"
-                )
+            if existing_product:
+                await existing_product.set(item)  # Mise à jour
+                logging.info(f"Produit {item['name']} ({item['product_id']}) mis à jour avec succès !")
             else:
-                print(
-                    f" Produit {item['title']} ({item['product_id']}) inséré avec succès !"
-                )
+                new_product = Product_scraping(**item)
+                await new_product.insert()  # Insertion
+                logging.info(f"Produit {item['name']} ({item['product_id']}) inséré avec succès !")
 
         except Exception as e:
-            print(f" Erreur lors de l'insertion MongoDB pour Vinted : {e}")
+            logging.error(f"Erreur lors de l'insertion du produit {item.get('product_id', 'inconnu')}: {e}")
+
 
 
 class VintedScraper(BaseScraper):
-
+    
     BASE_URL = "https://www.vinted.fr"
     SEARCH_URL = "https://www.vinted.fr/catalog"
 
-    def __init__(self):
+    def __init__(self,db_manager):
+        self.db_manager = db_manager
         """Initialisation du navigateur avec les options."""
         options = Options()
         options.add_argument(
@@ -68,6 +70,7 @@ class VintedScraper(BaseScraper):
         options.add_argument("--disable-gpu")
         options.add_argument("--start-maximized")
         options.add_argument("--log-level=3")  # Reduce unnecessary logs
+        
 
         service = Service(ChromeDriverManager().install())
         self.driver = webdriver.Chrome(service=service, options=options)
@@ -117,7 +120,7 @@ class VintedScraper(BaseScraper):
             # Sauvegarde dans MongoDB après extraction
             if produits:
                 logging.info(" Enregistrement des produits dans MongoDB...")
-                await save_to_mongo(produits)
+                await save_to_mongo(self.db_manager,produits)
 
         except Exception as e:
             logging.error(f"Erreur lors du scraping de Vinted: {str(e)}")
@@ -295,16 +298,147 @@ class VintedScraper(BaseScraper):
             logging.error(f"Erreur extraction detail article Vinted: {str(e)}")
             return []
 
+    # async def get_detail(self, product_url: str) -> List[Dict[str, Any]]:
+    #     logging.info("Obtenir la page contenant les detail du produits")
+    #     content = await self.get_page_content(product_url, "aside")
+        
+    #     if not content:
+    #         return []
+    #     soup = BeautifulSoup(content, "lxml")
+
+    #     logging.info("Extraction des informations importantes")
+    #     return self.parse_detail(soup)
+
+
     async def get_detail(self, product_url: str) -> List[Dict[str, Any]]:
-        logging.info("Obtenir la page contenant les detail du produits")
+        """Récupère et met à jour les détails d'un produit sur Vinted."""
+        
+        logging.info(f" Récupération du contenu de la page : {product_url}")
         content = await self.get_page_content(product_url, "aside")
+
         if not content:
+            logging.warning(f" Aucun contenu récupéré pour {product_url}.")
             return []
+
         soup = BeautifulSoup(content, "lxml")
 
-        logging.info("Extraction des informations importantes")
-        return self.parse_detail(soup)
+        logging.info(" Extraction des informations importantes...")
+        details = self.parse_detail(soup)
 
+        if not details:
+            logging.warning(f" Impossible d'extraire les détails pour {product_url}.")
+            return []
 
+        logging.info(f" Détails extraits : {details}")
 
-vinted_scraper = VintedScraper()
+        #  Correction : Passer le dictionnaire extrait à update_product_details()
+        updated_details = await self.update_product_details(details[0])  
+
+        return [updated_details]  # Toujours retourner une liste
+
+    async def update_product_details(self, detailed_product: Dict[str, Any]) -> Dict[str, Any]:
+        """Met à jour MongoDB avec les nouvelles données du produit."""
+        try:
+            if not isinstance(detailed_product, dict):
+                logging.error(f" Erreur: `detailed_product` n'est pas un dictionnaire ! Type reçu : {type(detailed_product)}")
+                return {}
+
+            product_id = detailed_product.get("product_id")
+            if not product_id:
+                logging.warning(" Impossible de récupérer l'ID du produit.")
+                return {}
+
+            #  Vérifier que MongoDB est bien initialisé
+            if not self.db_manager.is_initialized():
+                logging.info("🛠️ Initialisation de MongoDB avec Beanie...")
+                await self.db_manager.initialize()
+
+            #  Correction : Convertir `uploaded` en `str` si c'est un `dict`
+            if "uploaded" in detailed_product and isinstance(detailed_product["uploaded"], dict):
+                uploaded_data = detailed_product["uploaded"]
+                detailed_product["uploaded"] = f"{uploaded_data.get('scraped', 'N/A')} - {uploaded_data.get('time', 'N/A')}"
+
+            #  Rechercher si le produit existe déjà en base
+            existing_product = await Product_scraping.find_one({"product_id": product_id})
+
+            if existing_product:
+                updated_fields = {
+                    k: v for k, v in detailed_product.items()
+                    if getattr(existing_product, k, None) != v and v is not None
+                }
+
+                if updated_fields:
+                    try:
+                        await existing_product.set(updated_fields)
+                        logging.info(f" Produit {product_id} mis à jour avec {len(updated_fields)} nouvelles valeurs.")
+                    except Exception as e:
+                        logging.error(f" Erreur lors de la mise à jour du produit `{product_id}` dans MongoDB : {e}")
+                else:
+                    logging.info(f"ℹ️ Aucun changement détecté pour {product_id}.")
+            else:
+                try:
+                    new_product = Product_scraping(**detailed_product)
+                    await new_product.insert()
+                    logging.info(f" Produit {product_id} ajouté en base.")
+                except Exception as e:
+                    logging.error(f" Erreur lors de l'insertion du produit `{product_id}` dans MongoDB : {e}")
+
+            return detailed_product  
+
+        except Exception as e:
+            logging.error(f" Erreur inattendue lors de la mise à jour du produit `{product_id}` : {e}")
+            return {}
+        
+    async def update_product_details(self, detailed_product: Dict[str, Any]) -> Dict[str, Any]:
+        """Met à jour MongoDB avec les nouvelles données du produit Amazon."""
+        try:
+            if not isinstance(detailed_product, dict):
+                logging.error(f" Erreur: `detailed_product` n'est pas un dictionnaire ! Type reçu : {type(detailed_product)}")
+                return {}
+
+            product_id = detailed_product.get("product_id")
+            if not product_id:
+                logging.warning(" Impossible de récupérer l'ID du produit.")
+                return {}
+
+            #  Vérifier que MongoDB est bien initialisé
+            if not self.db_manager.is_initialized():
+                logging.info("🛠️ Initialisation de MongoDB avec Beanie...")
+                await self.db_manager.initialize()
+
+            #  Correction : Convertir `uploaded` en `str` si c'est un `dict`
+            if "uploaded" in detailed_product and isinstance(detailed_product["uploaded"], dict):
+                uploaded_data = detailed_product["uploaded"]
+                detailed_product["uploaded"] = f"{uploaded_data.get('scraped', 'N/A')} - {uploaded_data.get('time', 'N/A')}"
+
+            #  Rechercher si le produit existe déjà en base
+            existing_product = await Product_scraping.find_one({"product_id": product_id})
+
+            if existing_product:
+                updated_fields = {
+                    k: v for k, v in detailed_product.items()
+                    if getattr(existing_product, k, None) != v and v is not None
+                }
+
+                if updated_fields:
+                    try:
+                        await existing_product.set(updated_fields)
+                        logging.info(f" Produit {product_id} mis à jour avec {len(updated_fields)} nouvelles valeurs.")
+                    except Exception as e:
+                        logging.error(f" Erreur lors de la mise à jour du produit `{product_id}` dans MongoDB : {e}")
+                else:
+                    logging.info(f"ℹ️ Aucun changement détecté pour {product_id}.")
+            else:
+                try:
+                    new_product = Product_scraping(**detailed_product)
+                    await new_product.insert()
+                    logging.info(f" Produit {product_id} ajouté en base.")
+                except Exception as e:
+                    logging.error(f" Erreur lors de l'insertion du produit `{product_id}` dans MongoDB : {e}")
+
+            return detailed_product  
+
+        except Exception as e:
+            logging.error(f" Erreur inattendue lors de la mise à jour du produit `{product_id}` : {e}")
+            return {}
+
